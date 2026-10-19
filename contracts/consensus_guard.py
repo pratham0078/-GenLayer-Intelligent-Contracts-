@@ -73,6 +73,32 @@ Rules:
 """.strip()
 
 
+def _ensure_dict(obj):
+    """Normalize possible return shapes into a Python dict.
+
+    Accepts: dict, JSON string, or objects with a `calldata` attribute (e.g. gl.vm.Return).
+    """
+    # If it's a gl.vm.Return-like object with calldata, extract it
+    try:
+        vm_return_type = getattr(gl, "vm").Return
+    except Exception:
+        vm_return_type = None
+
+    if vm_return_type is not None and isinstance(obj, vm_return_type):
+        obj = obj.calldata
+
+    if isinstance(obj, str):
+        try:
+            obj = json.loads(obj)
+        except Exception:
+            raise ValueError("response must be a JSON object or JSON string")
+
+    if not isinstance(obj, dict):
+        raise ValueError("response must be a JSON object")
+
+    return obj
+
+
 def evaluate(claim: str, source_url: str) -> dict:
     page = gl.nondet.web.get(source_url)
     source_text = page.body.decode("utf-8", errors="ignore")[:30000]
@@ -80,6 +106,7 @@ def evaluate(claim: str, source_url: str) -> dict:
     prompt = build_prompt(claim, source_url, source_text)
     raw = gl.nondet.exec_prompt(prompt, response_format="json")
 
+    raw = _ensure_dict(raw)
     return normalize_result(raw)
 
 
@@ -132,10 +159,19 @@ class ConsensusGuard(gl.Contract):
 
         def validator_fn(leader_result):
             try:
-                if not isinstance(leader_result, gl.vm.Return):
+                # leader_result may come wrapped as gl.vm.Return or as a raw dict
+                try:
+                    vm_return_type = getattr(gl, "vm").Return
+                except Exception:
+                    vm_return_type = None
+
+                if vm_return_type is not None and isinstance(leader_result, vm_return_type):
+                    leader_data = leader_result.calldata
+                elif isinstance(leader_result, dict):
+                    leader_data = leader_result
+                else:
                     return False
 
-                leader_data = leader_result.calldata
                 validator_data = evaluate(claim, source_url)
 
                 return equivalent(leader_data, validator_data)
@@ -147,6 +183,18 @@ class ConsensusGuard(gl.Contract):
             leader_fn,
             validator_fn
         )
+
+        # run_nondet_unsafe may return a gl.vm.Return wrapper; normalize to dict
+        try:
+            vm_return_type = getattr(gl, "vm").Return
+        except Exception:
+            vm_return_type = None
+
+        if vm_return_type is not None and isinstance(result, vm_return_type):
+            result = result.calldata
+
+        # final check and normalization
+        result = _ensure_dict(result)
 
         self.last_request_id += 1
         self.total_resolved += 1
